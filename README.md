@@ -96,7 +96,7 @@ MyCPU/
 │   ├── sim_new_nowave.py   # 不带波形的仿真脚本
 │   └── sim_with_wave.py    # 带波形的仿真脚本
 ├── tb/                     # 测试平台代码
-│   └── tinyriscv_soc_tb.v  # SoC顶层测试平台
+│   └── MyCPU_soc_tb.v      # SoC顶层测试平台
 ├── tests/                  # 测试程序代码
 │   ├── example/            # 软件例程
 │   │   ├── coremark/       # CoreMark测试程序
@@ -164,7 +164,406 @@ MyCPU/
    - 通过JTAG或UART接口下载编译好的二进制文件
    - 使用OpenOCD或自定义下载工具
 
-## 5. 未来展望
+## 5. 代码实现说明
+
+### 5.1 核心流水线实现
+
+MyCPU采用五级流水线架构，以下是关键模块的实现细节：
+
+#### 5.1.1 数据前递机制
+
+数据前递机制是解决流水线数据相关问题的关键技术，以下是`id.v`中的相关实现：
+
+```verilog
+// 检测寄存器1数据相关
+always @ (*) begin
+    // 默认值
+    reg1_raw_ex = 1'b0;
+    reg1_raw_mem = 1'b0;
+    reg1_raw_wb = 1'b0;
+    
+    // 检测EX阶段数据相关
+    if ((ex_reg_we_i == `WriteEnable) && (ex_reg_waddr_i != `ZeroReg) && (ex_reg_waddr_i == rs1)) begin
+        reg1_raw_ex = 1'b1;
+    // 检测MEM阶段数据相关
+    end else if ((mem_reg_we_i == `WriteEnable) && (mem_reg_waddr_i != `ZeroReg) && (mem_reg_waddr_i == rs1)) begin
+        reg1_raw_mem = 1'b1;
+    // 检测WB阶段数据相关
+    end else if ((wb_reg_we_i == `WriteEnable) && (wb_reg_waddr_i != `ZeroReg) && (wb_reg_waddr_i == rs1)) begin
+        reg1_raw_wb = 1'b1;
+    end
+end
+
+// 确定寄存器1最终使用的数据
+assign reg1_data = (rs1 == `ZeroReg) ? `ZeroWord :
+                   reg1_raw_ex ? ex_reg_wdata_i :
+                   reg1_raw_mem ? mem_reg_wdata_i :
+                   reg1_raw_wb ? wb_reg_wdata_i :
+                   reg1_rdata_i;
+```
+
+这段代码通过检测各阶段的寄存器写回信息，识别数据相关，并从最近的阶段前递数据。
+
+#### 5.1.2 流水线暂停控制
+
+在`ctrl.v`模块中实现了流水线暂停控制逻辑，主要处理以下几种暂停情况：
+- 加载使用型相关 (load-use hazard)
+- 除法器忙时的暂停
+- 总线访问冲突时的暂停
+- 中断处理时的暂停
+
+#### 5.1.3 分支预测与跳转控制
+
+MyCPU采用静态分支预测策略，在执行阶段确定是否跳转：
+
+```verilog
+// 分支指令处理
+case (funct3)
+    `INST_BEQ: begin
+        jump_flag = op1_eq_op2 ? `JumpEnable : `JumpDisable;
+        jump_addr = op1_eq_op2 ? op1_jump_add_op2_jump_res : inst_addr_i + 4'h4;
+    end
+    `INST_BNE: begin
+        jump_flag = (!op1_eq_op2) ? `JumpEnable : `JumpDisable;
+        jump_addr = (!op1_eq_op2) ? op1_jump_add_op2_jump_res : inst_addr_i + 4'h4;
+    end
+    `INST_BLT: begin
+        jump_flag = (!op1_ge_op2_signed) ? `JumpEnable : `JumpDisable;
+        jump_addr = (!op1_ge_op2_signed) ? op1_jump_add_op2_jump_res : inst_addr_i + 4'h4;
+    end
+    // 其他分支指令...
+endcase
+```
+
+### 5.2 高效算术单元
+
+#### 5.2.1 Radix-8 除法器
+
+MyCPU实现了高效的Radix-8除法器，每次尝试除以7/6/5/4/3/2/1倍的除数，大大提高了除法效率：
+
+```verilog
+// 比较结果
+wire minuend_ge_divisor = minuend >= divisor_r;
+wire minuend_ge_2x_divisor = minuend >= divisor_2x;
+wire minuend_ge_3x_divisor = minuend >= divisor_3x;
+wire minuend_ge_4x_divisor = minuend >= divisor_4x;
+wire minuend_ge_5x_divisor = minuend >= divisor_5x;
+wire minuend_ge_6x_divisor = minuend >= divisor_6x;
+wire minuend_ge_7x_divisor = minuend >= divisor_7x;
+
+// 根据比较结果计算下一个减数和余数位
+always @(*) begin
+    if (minuend_ge_7x_divisor) begin
+        next_minuend = minuend_sub_7x;
+        next_quotient_bits = 3'b111; // 7
+    end else if (minuend_ge_6x_divisor) begin
+        next_minuend = minuend_sub_6x;
+        next_quotient_bits = 3'b110; // 6
+    end
+    // 其他情况...
+end
+```
+
+此外，还优化了除以2^n的特殊情况，使其可以在一个周期内完成：
+
+```verilog
+// 2^n快速路径检测 - 检查除数是否为2的幂次方
+wire is_power_of_two = (divisor_r & (divisor_r - 1)) == 32'h0 && divisor_r != 32'h0;
+
+// 计算快速路径结果 - 商和余数
+wire[31:0] fast_quotient = dividend_r >> shift_count;
+wire[31:0] fast_remainder = dividend_r & ((1 << shift_count) - 1);
+```
+
+#### 5.2.2 乘法器实现
+
+乘法器支持各种有符号和无符号乘法操作：
+
+```verilog
+// 乘法指令处理
+case (funct3)
+    `INST_MUL: begin
+        // 低32位乘法结果
+        reg_wdata = mul_temp[31:0];
+    end
+    `INST_MULH: begin
+        // 有符号数乘法，取高32位
+        if ((reg1_rdata_i[31] ^ reg2_rdata_i[31]) == 1'b1) begin
+            reg_wdata = mul_temp_invert[63:32];
+        end else begin
+            reg_wdata = mul_temp[63:32];
+        end
+    end
+    // 其他乘法指令...
+endcase
+```
+
+### 5.3 多主多从总线架构
+
+MyCPU采用一种多主多从的总线结构，提供了高效的设备互连方案：
+
+```verilog
+// 仲裁逻辑
+// 固定优先级仲裁机制
+// 优先级由高到低：主设备3，主设备0，主设备2，主设备1
+always @ (*) begin
+    if (req[3]) begin
+        grant = grant3;
+        hold_flag_o = `HoldEnable;
+    end else if (req[0]) begin
+        grant = grant0;
+        hold_flag_o = `HoldEnable;
+    end else if (req[2]) begin
+        grant = grant2;
+        hold_flag_o = `HoldEnable;
+    end else begin
+        grant = grant1;
+        hold_flag_o = `HoldDisable;
+    end
+end
+```
+
+这种结构支持多达4个主设备和6个从设备，通过地址高位解码选择从设备：
+
+```verilog
+// 访问地址的最高4位决定要访问的是哪一个从设备
+// 因此最多支持16个从设备
+parameter [3:0]slave_0 = 4'b0000;
+parameter [3:0]slave_1 = 4'b0001;
+parameter [3:0]slave_2 = 4'b0010;
+parameter [3:0]slave_3 = 4'b0011;
+parameter [3:0]slave_4 = 4'b0100;
+parameter [3:0]slave_5 = 4'b0101;
+```
+
+### 5.4 访存优化实现
+
+MyCPU实现了灵活的访存机制，支持不同数据宽度的加载和存储操作。相关优化包括：
+
+#### 5.4.1 精确的字节选择逻辑
+
+在执行阶段，根据指令类型和地址低位生成精确的字节选择信号，确保只有必要的字节被访问：
+
+```verilog
+// 字节存储指令的字节选择逻辑
+case (op1_add_op2_res[1:0])
+    2'b00: begin
+        mem_wdata_o = {24'b0, reg2_rdata_i[7:0]};
+        mem_sel_o = 4'b0001;
+    end
+    2'b01: begin
+        mem_wdata_o = {16'b0, reg2_rdata_i[7:0], 8'b0};
+        mem_sel_o = 4'b0010;
+    end
+    2'b10: begin
+        mem_wdata_o = {8'b0, reg2_rdata_i[7:0], 16'b0};
+        mem_sel_o = 4'b0100;
+    end
+    2'b11: begin
+        mem_wdata_o = {reg2_rdata_i[7:0], 24'b0};
+        mem_sel_o = 4'b1000;
+    end
+endcase
+```
+
+#### 5.4.2 加载指令数据扩展处理
+
+在访存阶段，根据加载指令的类型对读取的数据进行符号或零扩展，支持字节(LB/LBU)、半字(LH/LHU)和字(LW)操作：
+
+```verilog
+// 字节加载指令的符号扩展
+case (mem_raddr_i[1:0])
+    2'b00: reg_wdata = {{24{mem_data_i[7]}}, mem_data_i[7:0]};
+    2'b01: reg_wdata = {{24{mem_data_i[15]}}, mem_data_i[15:8]};
+    2'b10: reg_wdata = {{24{mem_data_i[23]}}, mem_data_i[23:16]};
+    2'b11: reg_wdata = {{24{mem_data_i[31]}}, mem_data_i[31:24]};
+    default: reg_wdata = `ZeroWord;
+endcase
+
+// 无符号字节加载指令的零扩展
+case (mem_raddr_i[1:0])
+    2'b00: reg_wdata = {24'b0, mem_data_i[7:0]};
+    2'b01: reg_wdata = {24'b0, mem_data_i[15:8]};
+    2'b10: reg_wdata = {24'b0, mem_data_i[23:16]};
+    2'b11: reg_wdata = {24'b0, mem_data_i[31:24]};
+    default: reg_wdata = `ZeroWord;
+endcase
+```
+
+#### 5.4.3 Load-Use冲突检测
+
+为解决加载指令与其后续指令之间的数据相关问题，实现了专门的Load-Use冲突检测机制：
+
+```verilog
+// load-use相关性检测 - 当前指令要读取的寄存器是EX阶段的load指令要写的寄存器
+always @ (*) begin
+    // 默认没有load-use相关
+    load_use_relevant_o = 1'b0;
+    
+    // 如果EX阶段指令是load类型，且当前指令读取的寄存器与EX阶段要写入的寄存器相同
+    if (ex_inst_is_load && ex_reg_we_i && ex_reg_waddr_i != `ZeroReg) begin
+        if ((reg1_raddr_o != `ZeroReg && reg1_raddr_o == ex_reg_waddr_i) || 
+            (reg2_raddr_o != `ZeroReg && reg2_raddr_o == ex_reg_waddr_i)) begin
+            load_use_relevant_o = 1'b1;
+        end
+    end
+end
+```
+
+当检测到Load-Use冲突时，控制器会插入流水线气泡：
+
+```verilog
+// 在ctrl.v中处理load-use冲突
+else if (load_use_relevant_i == `HoldEnable) begin
+    hold_flag_o = `HOLD_PC | `HOLD_IF | `HOLD_ID;
+end
+```
+
+#### 5.4.4 访存操作分类
+
+MyCPU通过opcode和funct3字段识别不同类型的访存操作：
+
+```verilog
+// 识别加载指令类型
+`define INST_TYPE_L  7'b0000011
+`define INST_LB      3'b000
+`define INST_LH      3'b001
+`define INST_LW      3'b010
+`define INST_LBU     3'b100
+`define INST_LHU     3'b101
+
+// 识别存储指令类型
+`define INST_TYPE_S  7'b0100011
+`define INST_SB      3'b000
+`define INST_SH      3'b001
+`define INST_SW      3'b010
+```
+
+### 5.5 中断处理机制
+
+MyCPU实现了符合RISC-V特权架构规范的中断处理机制，支持异常、软件中断和外部中断：
+
+#### 5.5.1 中断控制器状态机
+
+`clint.v`模块实现了完整的中断状态机，包括空闲、同步中断断言、异步中断断言、中断返回等状态：
+
+```verilog
+// 中断处理逻辑
+always @ (*) begin
+    if (rst == `RstEnable) begin
+        int_state = S_INT_IDLE;
+    end else begin
+        if (inst_i == `INST_ECALL || inst_i == `INST_EBREAK) begin
+            // 当执行阶段的指令为陷阱指令且除法器未工作时触发中断
+            if (div_started_i == `DivStop) begin
+                int_state = S_INT_SYNC_ASSERT;
+            end else begin
+                int_state = S_INT_IDLE;
+            end
+        end else if (int_flag_i != `INT_NONE && global_int_en_i == `True) begin
+            int_state = S_INT_ASYNC_ASSERT;
+        end else if (inst_i == `INST_MRET) begin
+            int_state = S_INT_MRET;
+        end else begin
+            int_state = S_INT_IDLE;
+        end
+    end
+end
+```
+
+#### 5.5.2 CSR寄存器访问与修改
+
+中断控制器根据中断类型和状态自动修改相关的CSR寄存器：
+
+```verilog
+// 写中断相关CSR寄存器
+case (csr_state)
+    // 将mepc寄存器赋值为当前指令地址
+    S_CSR_MEPC: begin
+        we_o <= `WriteEnable;
+        waddr_o <= {20'h0, `CSR_MEPC};
+        data_o <= inst_addr;
+    end
+    // 写中断产生的原因
+    S_CSR_MCAUSE: begin
+        we_o <= `WriteEnable;
+        waddr_o <= {20'h0, `CSR_MCAUSE};
+        data_o <= cause;
+    end
+    // 关闭全局中断
+    S_CSR_MSTATUS: begin
+        we_o <= `WriteEnable;
+        waddr_o <= {20'h0, `CSR_MSTATUS};
+        data_o <= {csr_mstatus[31:4], 1'b0, csr_mstatus[2:0]};
+    end
+    // 中断返回时恢复全局中断状态
+    S_CSR_MSTATUS_MRET: begin
+        we_o <= `WriteEnable;
+        waddr_o <= {20'h0, `CSR_MSTATUS};
+        data_o <= {csr_mstatus[31:4], csr_mstatus[7], csr_mstatus[2:0]};
+    end
+    default: begin
+        we_o <= `WriteDisable;
+        waddr_o <= `ZeroWord;
+        data_o <= `ZeroWord;
+    end
+endcase
+```
+
+#### 5.5.3 中断向量和返回地址管理
+
+中断控制器负责生成中断向量地址和管理中断返回：
+
+```verilog
+// 向执行单元发出中断信号
+always @ (*) begin
+    if (rst == `RstEnable) begin
+        int_assert_o = `INT_DEASSERT;
+        int_addr_o = `ZeroWord;
+    end else begin
+        case (csr_state)
+            // 当完成CSR寄存器的修改后，跳转到中断处理程序
+            S_CSR_MCAUSE: begin
+                int_assert_o = `INT_ASSERT;
+                int_addr_o = csr_mtvec;
+            end
+            // 中断返回时跳转到保存的返回地址
+            S_CSR_MSTATUS_MRET: begin
+                int_assert_o = `INT_ASSERT;
+                int_addr_o = csr_mepc;
+            end
+            default: begin
+                int_assert_o = `INT_DEASSERT;
+                int_addr_o = `ZeroWord;
+            end
+        endcase
+    end
+end
+```
+
+#### 5.5.4 中断优先级和嵌套
+
+MyCPU支持基于硬件的中断优先级机制，可通过修改CSR寄存器实现中断嵌套：
+
+```verilog
+// 在异步中断处理中根据中断类型确定优先级和处理方式
+if (int_flag_i != `INT_NONE && global_int_en_i == `True) begin
+    // 时钟中断
+    cause <= 32'h80000004;
+    csr_state <= S_CSR_MEPC;
+    // 自动保存当前PC值
+    if (jump_flag_i == `JumpEnable) begin
+        inst_addr <= jump_addr_i;
+    // 异步中断可能中断长指令的执行，中断处理程序需执行长指令
+    end else if (div_started_i == `DivStart) begin
+        inst_addr <= inst_addr_i - 4'h4;
+    end else begin
+        inst_addr <= inst_addr_i;
+    end
+end
+```
+
+## 6. 未来展望
 
 - **扩展指令集**：计划支持RV32F等扩展指令集
 - **多核支持**：设计多核互连架构
@@ -172,8 +571,9 @@ MyCPU/
 - **缓存支持**：实现指令缓存和数据缓存
 - **完善工具链**：开发更易用的开发和调试工具
 
-## 6. 参考资料
+## 7. 参考资料
 
 - [RISC-V规范文档](https://riscv.org/specifications/)
 - [RISC-V指令集手册](https://riscv.org/technical/specifications/)
 - [Wishbone总线规范](https://wishbone-interconnect.readthedocs.io/) 
+- [liangkangnan/tinyriscv: A very simple and easy to understand RISC-V core.](https://github.com/liangkangnan/tinyriscv)
