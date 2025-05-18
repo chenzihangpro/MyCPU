@@ -1,6 +1,6 @@
 # MyCPU RISC-V处理器核
 
-MyCPU是一个基于RISC-V指令集架构的32位处理器核心，采用五级流水线架构实现，支持RV32IM指令集及中断功能，可在FPGA上实现并通过标准RISC-V指令集兼容性测试。
+MyCPU是我们设计的基于RISC-V指令集架构的32位处理器核心，采用五级流水线架构实现，支持RV32IM指令集及中断功能，可在FPGA上实现并通过标准RISC-V指令集兼容性测试。
 
 ## 1. 处理器核心架构
 
@@ -73,7 +73,7 @@ MyCPU/
 │   │   ├── ctrl.v          # 控制模块
 │   │   ├── div.v           # 除法器
 │   │   ├── ex.v            # 执行阶段
-│   │   ├── id.v            # 译码阶段
+│   │   ├── id.v            # 译码阶段及数据前递
 │   │   ├── if_id.v         # IF/ID流水线寄存器
 │   │   ├── id_ex.v         # ID/EX流水线寄存器
 │   │   ├── ex_mem.v        # EX/MEM流水线寄存器
@@ -126,10 +126,11 @@ MyCPU/
    python test_all_isa.py
    ```
 
-3. **带波形仿真**
+3. **查看波形**
+   
    ```
    cd sim
-   python sim_with_wave.py <测试程序路径> inst.data
+   gtkwave MyCPU_soc_tb.vcd
    ```
 
 ### 4.2 FPGA实现

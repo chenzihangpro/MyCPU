@@ -3,7 +3,7 @@
 // Module Name: timer
 // Author     : sasathreena
 // Version    : 0.9
-// Description: 定时器控制器模块，支持三个独立定时器
+// Description: 定时器控制器模块
 //              提供可配置计数器和中断功能
 // -----------------------------------------------------------------------------
 // Revision History:
@@ -15,7 +15,7 @@
 // -----------------------------------------------------------------------------
 // 模块: timer - 定时器控制器
 // 功能: 实现32位向上计数定时器，提供计数值比较和中断功能
-// 说明: 支持多个定时器通道，可独立配置和控制
+// 说明: 实现32位定时器功能
 // -----------------------------------------------------------------------------
 
 `include "../core/defines.v"
@@ -27,33 +27,18 @@ module timer(
     input wire clk,
     input wire rst,
 
+    input wire[31:0] data_i,
+    input wire[31:0] addr_i,
     input wire we_i,
-    input wire[`MemAddrBus] addr_i,
-    input wire[`MemBus] data_i,
-    input wire[3:0] sel_i,        // 添加字节选择信号
 
-    output reg[`MemBus] data_o,
-    output wire timer0_int_o,
-    output wire timer1_int_o,
-    output wire timer2_int_o
+    output reg[31:0] data_o,
+    output wire int_sig_o
 
     );
 
-    // 定义本地常量
     localparam REG_CTRL = 4'h0;
     localparam REG_COUNT = 4'h4;
     localparam REG_VALUE = 4'h8;
-    
-    // 定义本地地址常量，避免使用宏
-    localparam ADDR_TIMER0_CTRL = 32'h20000;
-    localparam ADDR_TIMER0_COUNT = 32'h20004;
-    localparam ADDR_TIMER0_CMP = 32'h20008;
-    localparam ADDR_TIMER1_CTRL = 32'h2000C;
-    localparam ADDR_TIMER1_COUNT = 32'h20010;
-    localparam ADDR_TIMER1_CMP = 32'h20014;
-    localparam ADDR_TIMER2_CTRL = 32'h20018;
-    localparam ADDR_TIMER2_COUNT = 32'h2001C;
-    localparam ADDR_TIMER2_CMP = 32'h20020;
 
     // [0]: timer enable
     // [1]: timer int enable
@@ -70,9 +55,7 @@ module timer(
     reg[31:0] timer_value;
 
 
-    assign timer0_int_o = ((timer_ctrl[2] == 1'b1) && (timer_ctrl[1] == 1'b1))? `INT_ASSERT: `INT_DEASSERT;
-    assign timer1_int_o = ((timer_ctrl[2] == 1'b1) && (timer_ctrl[1] == 1'b1))? `INT_ASSERT: `INT_DEASSERT;
-    assign timer2_int_o = ((timer_ctrl[2] == 1'b1) && (timer_ctrl[1] == 1'b1))? `INT_ASSERT: `INT_DEASSERT;
+    assign int_sig_o = ((timer_ctrl[2] == 1'b1) && (timer_ctrl[1] == 1'b1))? `INT_ASSERT: `INT_DEASSERT;
 
     // counter
     always @ (posedge clk) begin
@@ -97,66 +80,12 @@ module timer(
             timer_value <= `ZeroWord;
         end else begin
             if (we_i == `WriteEnable) begin
-                case (addr_i)
-                    ADDR_TIMER0_CTRL: begin
-                        if (sel_i[0]) timer_ctrl[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_ctrl[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_ctrl[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_ctrl[31:24] <= data_i[31:24];
-                        timer_ctrl[0] <= data_i[0];
+                case (addr_i[3:0])
+                    REG_CTRL: begin
+                        timer_ctrl <= {data_i[31:3], (timer_ctrl[2] & (~data_i[2])), data_i[1:0]};
                     end
-                    ADDR_TIMER0_COUNT: begin
-                        if (sel_i[0]) timer_count[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_count[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_count[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_count[31:24] <= data_i[31:24];
-                    end
-                    ADDR_TIMER0_CMP: begin
-                        if (sel_i[0]) timer_value[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_value[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_value[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_value[31:24] <= data_i[31:24];
-                    end
-                    ADDR_TIMER1_CTRL: begin
-                        if (sel_i[0]) timer_ctrl[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_ctrl[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_ctrl[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_ctrl[31:24] <= data_i[31:24];
-                        timer_ctrl[0] <= data_i[0];
-                    end
-                    ADDR_TIMER1_COUNT: begin
-                        if (sel_i[0]) timer_count[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_count[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_count[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_count[31:24] <= data_i[31:24];
-                    end
-                    ADDR_TIMER1_CMP: begin
-                        if (sel_i[0]) timer_value[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_value[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_value[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_value[31:24] <= data_i[31:24];
-                    end
-                    ADDR_TIMER2_CTRL: begin
-                        if (sel_i[0]) timer_ctrl[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_ctrl[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_ctrl[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_ctrl[31:24] <= data_i[31:24];
-                        timer_ctrl[0] <= data_i[0];
-                    end
-                    ADDR_TIMER2_COUNT: begin
-                        if (sel_i[0]) timer_count[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_count[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_count[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_count[31:24] <= data_i[31:24];
-                    end
-                    ADDR_TIMER2_CMP: begin
-                        if (sel_i[0]) timer_value[7:0] <= data_i[7:0];
-                        if (sel_i[1]) timer_value[15:8] <= data_i[15:8];
-                        if (sel_i[2]) timer_value[23:16] <= data_i[23:16];
-                        if (sel_i[3]) timer_value[31:24] <= data_i[31:24];
-                    end
-                    default: begin
-                        // 不做任何操作
+                    REG_VALUE: begin
+                        timer_value <= data_i;
                     end
                 endcase
             end else begin

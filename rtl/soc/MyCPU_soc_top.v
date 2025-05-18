@@ -232,11 +232,8 @@ module MyCPU_soc_top(
         .we_i(s2_we_o),
         .addr_i(s2_addr_o),
         .data_i(s2_data_o),
-        .sel_i(s2_sel_o),
         .data_o(s2_data_i),
-        .timer0_int_o(timer0_int),
-        .timer1_int_o(timer1_int),
-        .timer2_int_o(timer2_int)
+        .int_sig_o(timer0_int)
     );
 
     // uart模块例化
