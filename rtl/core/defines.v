@@ -29,6 +29,14 @@
 `define INT_ASSERT 1'b1
 `define INT_DEASSERT 1'b0
 
+// 分支预测相关
+`define PredictTaken 1'b1
+`define PredictNotTaken 1'b0
+`define BPDisable 1'b0
+`define BPEnable 1'b1
+`define IsBranch 1'b1
+`define NotBranch 1'b0
+
 `define INT_BUS 7:0
 `define INT_NONE 8'h0
 `define INT_RET 8'hff

@@ -10,12 +10,13 @@
 // Date        By              Version         Change Description
 // -----------------------------------------------------------------------------
 // 2025/04/29  sasathreena     0.9             初始版本
+// 2025/04/30  sasathreena     1.0             添加分支预测支持
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 // 模块: ex - 执行单元
 // 功能: 执行算术逻辑运算、比较、分支等操作
-// 说明: 包含ALU和分支单元，负责指令的运算和地址生成
+// 说明: 包含ALU和分支单元，负责指令的运算和地址生成，验证分支预测结果
 // -----------------------------------------------------------------------------
 
 `include "defines.v"
@@ -42,6 +43,11 @@ module ex(
     input wire[`MemAddrBus] op2_i,
     input wire[`MemAddrBus] op1_jump_i,
     input wire[`MemAddrBus] op2_jump_i,
+
+    // 分支预测接口
+    input wire is_branch_i,                 // 是否是分支指令
+    input wire predict_taken_i,             // 预测的跳转方向
+    input wire[`InstAddrBus] predict_addr_i, // 预测的跳转地址
 
     // from div
     input wire div_ready_i,                 // 除法运算完成标志
@@ -79,8 +85,14 @@ module ex(
     output wire jump_flag_o,                // 是否跳转标志
     output wire[`InstAddrBus] jump_addr_o,   // 跳转目的地址
     
+    // 分支预测输出
+    output wire predict_error_o,            // 预测错误标志
+    output wire[`InstAddrBus] real_branch_addr_o, // 实际的分支目标地址
+
     // 指令类型标志
-    output wire inst_is_load_o              // 当前指令是否为加载指令
+    output wire inst_is_load_o,             // 当前指令是否为加载指令
+    output wire is_branch_o,                // 当前指令是否为分支指令
+    output wire branch_taken_o              // 分支是否跳转
 
     );
 
@@ -121,6 +133,12 @@ module ex(
     reg mem_we;
     reg mem_req;
     reg div_start;
+
+    // 分支预测相关的变量
+    reg is_branch;
+    reg branch_taken;
+    reg predict_error;
+    reg[`InstAddrBus] real_branch_addr;
 
     assign opcode = inst_i[6:0];
     assign funct3 = inst_i[14:12];
@@ -174,6 +192,11 @@ module ex(
 
     // 指令类型标志
     assign inst_is_load_o = (opcode == `INST_TYPE_L) ? `True : `False;
+
+    assign is_branch_o = is_branch;
+    assign branch_taken_o = branch_taken;
+    assign predict_error_o = predict_error;
+    assign real_branch_addr_o = real_branch_addr;
 
     // 处理乘法指令
     always @ (*) begin
@@ -258,6 +281,12 @@ module ex(
         mem_req = `RIB_NREQ;
         csr_wdata_o = `ZeroWord;
         mem_sel_o = 4'b0000;
+
+        // 分支预测相关变量初始化
+        is_branch = `NotBranch;
+        branch_taken = 1'b0;
+        predict_error = 1'b0;
+        real_branch_addr = `ZeroWord;
 
         case (opcode)
             `INST_TYPE_I: begin
@@ -746,6 +775,8 @@ module ex(
                 endcase
             end
             `INST_TYPE_B: begin
+                is_branch = `IsBranch;
+                
                 case (funct3)
                     `INST_BEQ: begin
                         hold_flag = `HoldDisable;
@@ -755,9 +786,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = op1_eq_op2 & `JumpEnable;
-                        jump_addr = {32{op1_eq_op2}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = op1_eq_op2;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     `INST_BNE: begin
                         hold_flag = `HoldDisable;
                         mem_wdata_o = `ZeroWord;
@@ -766,9 +823,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = (~op1_eq_op2) & `JumpEnable;
-                        jump_addr = {32{(~op1_eq_op2)}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = ~op1_eq_op2;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     `INST_BLT: begin
                         hold_flag = `HoldDisable;
                         mem_wdata_o = `ZeroWord;
@@ -777,9 +860,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = (~op1_ge_op2_signed) & `JumpEnable;
-                        jump_addr = {32{(~op1_ge_op2_signed)}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = ~op1_ge_op2_signed;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     `INST_BGE: begin
                         hold_flag = `HoldDisable;
                         mem_wdata_o = `ZeroWord;
@@ -788,9 +897,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = (op1_ge_op2_signed) & `JumpEnable;
-                        jump_addr = {32{(op1_ge_op2_signed)}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = op1_ge_op2_signed;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     `INST_BLTU: begin
                         hold_flag = `HoldDisable;
                         mem_wdata_o = `ZeroWord;
@@ -799,9 +934,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = (~op1_ge_op2_unsigned) & `JumpEnable;
-                        jump_addr = {32{(~op1_ge_op2_unsigned)}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = ~op1_ge_op2_unsigned;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     `INST_BGEU: begin
                         hold_flag = `HoldDisable;
                         mem_wdata_o = `ZeroWord;
@@ -810,9 +971,35 @@ module ex(
                         mem_we = `WriteDisable;
                         mem_req = `RIB_NREQ;
                         reg_wdata = `ZeroWord;
-                        jump_flag = (op1_ge_op2_unsigned) & `JumpEnable;
-                        jump_addr = {32{(op1_ge_op2_unsigned)}} & op1_jump_add_op2_jump_res;
+                        
+                        branch_taken = op1_ge_op2_unsigned;
+                        real_branch_addr = op1_jump_add_op2_jump_res;
+                        
+                        // 如果是分支指令并且进行了预测
+                        if (is_branch_i) begin
+                            // 如果预测结果与实际不一致
+                            if ((branch_taken && !predict_taken_i) || (!branch_taken && predict_taken_i)) begin
+                                predict_error = 1'b1;
+                                jump_flag = `JumpEnable;
+                                if (branch_taken) begin
+                                    // 实际应该跳转但预测不跳转
+                                    jump_addr = op1_jump_add_op2_jump_res;
+                                end else begin
+                                    // 实际不应跳转但预测跳转
+                                    jump_addr = inst_addr_i + 4'h4;
+                                end
+                            end else begin
+                                // 预测正确
+                                jump_flag = `JumpDisable;
+                                jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                            end
+                        end else begin
+                            // 没有预测，使用常规处理方式
+                            jump_flag = branch_taken ? `JumpEnable : `JumpDisable;
+                            jump_addr = branch_taken ? op1_jump_add_op2_jump_res : (inst_addr_i + 4'h4);
+                        end
                     end
+                    
                     default: begin
                         jump_flag = `JumpDisable;
                         hold_flag = `HoldDisable;
@@ -826,17 +1013,38 @@ module ex(
                     end
                 endcase
             end
+            
             `INST_JAL, `INST_JALR: begin
+                is_branch = `IsBranch;
+                branch_taken = 1'b1; // JAL和JALR总是跳转
+                real_branch_addr = op1_jump_add_op2_jump_res;
+                
                 hold_flag = `HoldDisable;
                 mem_wdata_o = `ZeroWord;
                 mem_raddr_o = `ZeroWord;
                 mem_waddr_o = `ZeroWord;
                 mem_we = `WriteDisable;
                 mem_req = `RIB_NREQ;
-                jump_flag = `JumpEnable;
-                jump_addr = op1_jump_add_op2_jump_res;
                 reg_wdata = op1_add_op2_res;
+                
+                // 如果是分支指令并且进行了预测
+                if (is_branch_i) begin
+                    // 如果预测结果与实际不一致 (对于JAL/JALR，预测应当跳转且地址应当正确)
+                    if (!predict_taken_i || (predict_taken_i && (predict_addr_i != op1_jump_add_op2_jump_res))) begin
+                        predict_error = 1'b1;
+                        jump_flag = `JumpEnable;
+                        jump_addr = op1_jump_add_op2_jump_res;
+                    end else begin
+                        // 预测正确
+                        jump_flag = `JumpDisable;
+                    end
+                end else begin
+                    // 没有预测，使用常规处理方式
+                    jump_flag = `JumpEnable;
+                    jump_addr = op1_jump_add_op2_jump_res;
+                end
             end
+            
             `INST_LUI, `INST_AUIPC: begin
                 hold_flag = `HoldDisable;
                 mem_wdata_o = `ZeroWord;

@@ -10,12 +10,13 @@
 // Date        By              Version         Change Description
 // -----------------------------------------------------------------------------
 // 2025/04/10  sasathreena     0.9             初始版本
+// 2025/04/30  sasathreena     1.0             添加分支预测功能
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 // 模块: MyCPU - RISC-V处理器核心
 // 功能: 实现RV32I基本指令集架构，提供流水线执行单元
-// 说明: 包含取指、译码、执行、访存、写回五级流水线结构
+// 说明: 包含取指、译码、执行、访存、写回五级流水线结构，添加分支预测器
 // -----------------------------------------------------------------------------
 
 `include "defines.v"
@@ -56,6 +57,8 @@ module MyCPU(
 	wire[`InstBus] if_inst_o;
     wire[`InstAddrBus] if_inst_addr_o;
     wire[`INT_BUS] if_int_flag_o;
+    wire if_predict_taken_o;
+    wire[`InstAddrBus] if_predict_addr_o;
 
     // id模块输出信号
     wire[`RegAddrBus] id_reg1_raddr_o;
@@ -75,6 +78,9 @@ module MyCPU(
     wire[`MemAddrBus] id_op1_jump_o;
     wire[`MemAddrBus] id_op2_jump_o;
     wire id_load_use_relevant_o;          // load-use相关信号
+    wire id_is_branch_o;                  // 是否是分支指令
+    wire id_predict_taken_o;              // 分支预测结果
+    wire[`InstAddrBus] id_predict_addr_o; // 预测的分支地址
 
     // id_ex模块输出信号
     wire[`InstBus] ie_inst_o;
@@ -90,6 +96,9 @@ module MyCPU(
     wire[`MemAddrBus] ie_op2_o;
     wire[`MemAddrBus] ie_op1_jump_o;
     wire[`MemAddrBus] ie_op2_jump_o;
+    wire ie_is_branch_o;                  // 是否是分支指令
+    wire ie_predict_taken_o;              // 分支预测结果
+    wire[`InstAddrBus] ie_predict_addr_o; // 预测的分支地址
 
     // ex模块输出信号
     wire[`MemBus] ex_mem_wdata_o;
@@ -113,6 +122,10 @@ module MyCPU(
     wire ex_csr_we_o;
     wire[`MemAddrBus] ex_csr_waddr_o;
     wire ex_inst_is_load_o;              // load指令标志
+    wire ex_is_branch_o;                 // 分支指令标志
+    wire ex_branch_taken_o;              // 分支是否跳转
+    wire ex_predict_error_o;              // 预测错误标志
+    wire[`InstAddrBus] ex_real_branch_addr_o; // 实际的分支目标地址
     
     // ex_mem模块输出信号
     wire[`InstBus] exm_inst_o;
@@ -204,6 +217,12 @@ module MyCPU(
     wire clint_int_assert_o;
     wire clint_hold_flag_o;
 
+    // 分支预测器信号
+    wire bp_predict_taken_o;
+    wire[`InstAddrBus] bp_predict_addr_o;
+    wire predict_flag_o;
+    wire predict_true_o;
+
 
     assign rib_ex_addr_o = mem_mem_we_o ? mem_mem_waddr_o : mem_mem_raddr_o;
     assign rib_ex_data_o = mem_mem_wdata_o;
@@ -213,6 +232,20 @@ module MyCPU(
 
     assign rib_pc_addr_o = pc_pc_o;
 
+    // 分支预测器模块例化
+    branch_prediction u_branch_prediction(
+        .clk(clk),
+        .rst(rst),
+        // 取指阶段接口
+        .pc_i(pc_pc_o),
+        .prediction_o(bp_predict_taken_o),
+        .predicted_pc_o(bp_predict_addr_o),
+        // 执行阶段更新接口
+        .branch_i(ex_is_branch_o),
+        .jump_i(ex_branch_taken_o),
+        .branch_pc_i(ie_inst_addr_o),
+        .target_pc_i(ex_real_branch_addr_o)
+    );
 
     // pc_reg模块例化
     pc_reg u_pc_reg(
@@ -222,7 +255,12 @@ module MyCPU(
         .pc_o(pc_pc_o),
         .hold_flag_i(ctrl_hold_flag_o),
         .jump_flag_i(ctrl_jump_flag_o),
-        .jump_addr_i(ctrl_jump_addr_o)
+        .jump_addr_i(ctrl_jump_addr_o),
+        // 分支预测接口
+        .bp_predict_taken_i(bp_predict_taken_o),
+        .bp_predict_addr_i(bp_predict_addr_o),
+        .predict_flag_i(id_is_branch_o),  // 使用ID阶段的分支标志，确保指令已解码
+        .predict_error_i(ex_predict_error_o)
     );
 
     // ctrl模块例化
@@ -287,7 +325,12 @@ module MyCPU(
         .int_flag_o(if_int_flag_o),
         .hold_flag_i(ctrl_hold_flag_o),
         .inst_o(if_inst_o),
-        .inst_addr_o(if_inst_addr_o)
+        .inst_addr_o(if_inst_addr_o),
+        // 分支预测接口
+        .predict_taken_i(bp_predict_taken_o),
+        .predict_addr_i(bp_predict_addr_o),
+        .predict_taken_o(if_predict_taken_o),
+        .predict_addr_o(if_predict_addr_o)
     );
 
     // id模块例化
@@ -325,7 +368,13 @@ module MyCPU(
         .csr_we_o(id_csr_we_o),
         .csr_rdata_o(id_csr_rdata_o),
         .csr_waddr_o(id_csr_waddr_o),
-        .load_use_relevant_o(id_load_use_relevant_o)
+        .load_use_relevant_o(id_load_use_relevant_o),
+        // 分支预测接口
+        .predict_taken_i(if_predict_taken_o),
+        .predict_addr_i(if_predict_addr_o),
+        .is_branch_o(id_is_branch_o),
+        .predict_taken_o(id_predict_taken_o),
+        .predict_addr_o(id_predict_addr_o)
     );
 
     // id_ex模块例化
@@ -358,7 +407,14 @@ module MyCPU(
         .csr_rdata_i(id_csr_rdata_o),
         .csr_we_o(ie_csr_we_o),
         .csr_waddr_o(ie_csr_waddr_o),
-        .csr_rdata_o(ie_csr_rdata_o)
+        .csr_rdata_o(ie_csr_rdata_o),
+        // 分支预测接口
+        .is_branch_i(id_is_branch_o),
+        .predict_taken_i(id_predict_taken_o),
+        .predict_addr_i(id_predict_addr_o),
+        .is_branch_o(ie_is_branch_o),
+        .predict_taken_o(ie_predict_taken_o),
+        .predict_addr_o(ie_predict_addr_o)
     );
 
     // ex模块例化
@@ -374,6 +430,14 @@ module MyCPU(
         .op2_i(ie_op2_o),
         .op1_jump_i(ie_op1_jump_o),
         .op2_jump_i(ie_op2_jump_o),
+        // 分支预测接口
+        .is_branch_i(ie_is_branch_o),
+        .predict_taken_i(ie_predict_taken_o),
+        .predict_addr_i(ie_predict_addr_o),
+        .predict_error_o(ex_predict_error_o),
+        .real_branch_addr_o(ex_real_branch_addr_o),
+        .is_branch_o(ex_is_branch_o),
+        .branch_taken_o(ex_branch_taken_o),
         .mem_wdata_o(ex_mem_wdata_o),
         .mem_raddr_o(ex_mem_raddr_o),
         .mem_waddr_o(ex_mem_waddr_o),

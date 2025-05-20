@@ -20,6 +20,14 @@ module id_ex(
     input wire[`MemAddrBus] op1_jump_i,
     input wire[`MemAddrBus] op2_jump_i,
 
+    // 分支预测接口
+    input wire is_branch_i,                 // 是否是分支指令
+    input wire predict_taken_i,             // 预测的跳转方向
+    input wire[`InstAddrBus] predict_addr_i, // 预测的跳转地址
+    output wire is_branch_o,                // 传递给EX阶段是否是分支指令
+    output wire predict_taken_o,            // 传递给EX阶段的预测结果
+    output wire[`InstAddrBus] predict_addr_o, // 传递给EX阶段的预测地址
+
     input wire[`Hold_Flag_Bus] hold_flag_i, // 流水线暂停标志
 
     output wire[`MemAddrBus] op1_o,
@@ -57,24 +65,12 @@ module id_ex(
     assign reg_waddr_o = reg_waddr;
 
     wire[`RegBus] reg1_rdata;
-    gen_pipe_dff #(32) reg1_rdata_ff(clk, rst, hold_en, `ZeroWord, reg1_rdata_i, reg1_rdata);
+    gen_pipe_dff #(32) reg1_ff(clk, rst, hold_en, `ZeroWord, reg1_rdata_i, reg1_rdata);
     assign reg1_rdata_o = reg1_rdata;
 
     wire[`RegBus] reg2_rdata;
-    gen_pipe_dff #(32) reg2_rdata_ff(clk, rst, hold_en, `ZeroWord, reg2_rdata_i, reg2_rdata);
+    gen_pipe_dff #(32) reg2_ff(clk, rst, hold_en, `ZeroWord, reg2_rdata_i, reg2_rdata);
     assign reg2_rdata_o = reg2_rdata;
-
-    wire csr_we;
-    gen_pipe_dff #(1) csr_we_ff(clk, rst, hold_en, `WriteDisable, csr_we_i, csr_we);
-    assign csr_we_o = csr_we;
-
-    wire[`MemAddrBus] csr_waddr;
-    gen_pipe_dff #(32) csr_waddr_ff(clk, rst, hold_en, `ZeroWord, csr_waddr_i, csr_waddr);
-    assign csr_waddr_o = csr_waddr;
-
-    wire[`RegBus] csr_rdata;
-    gen_pipe_dff #(32) csr_rdata_ff(clk, rst, hold_en, `ZeroWord, csr_rdata_i, csr_rdata);
-    assign csr_rdata_o = csr_rdata;
 
     wire[`MemAddrBus] op1;
     gen_pipe_dff #(32) op1_ff(clk, rst, hold_en, `ZeroWord, op1_i, op1);
@@ -91,5 +87,30 @@ module id_ex(
     wire[`MemAddrBus] op2_jump;
     gen_pipe_dff #(32) op2_jump_ff(clk, rst, hold_en, `ZeroWord, op2_jump_i, op2_jump);
     assign op2_jump_o = op2_jump;
+
+    wire csr_we;
+    gen_pipe_dff #(1) csr_we_ff(clk, rst, hold_en, `WriteDisable, csr_we_i, csr_we);
+    assign csr_we_o = csr_we;
+
+    wire[`MemAddrBus] csr_waddr;
+    gen_pipe_dff #(32) csr_waddr_ff(clk, rst, hold_en, `ZeroWord, csr_waddr_i, csr_waddr);
+    assign csr_waddr_o = csr_waddr;
+
+    wire[`RegBus] csr_rdata;
+    gen_pipe_dff #(32) csr_rdata_ff(clk, rst, hold_en, `ZeroWord, csr_rdata_i, csr_rdata);
+    assign csr_rdata_o = csr_rdata;
+
+    // 传递分支预测信息
+    wire is_branch;
+    gen_pipe_dff #(1) is_branch_ff(clk, rst, hold_en, `NotBranch, is_branch_i, is_branch);
+    assign is_branch_o = is_branch;
+
+    wire predict_taken;
+    gen_pipe_dff #(1) predict_taken_ff(clk, rst, hold_en, `PredictNotTaken, predict_taken_i, predict_taken);
+    assign predict_taken_o = predict_taken;
+
+    wire[`InstAddrBus] predict_addr;
+    gen_pipe_dff #(32) predict_addr_ff(clk, rst, hold_en, `ZeroWord, predict_addr_i, predict_addr);
+    assign predict_addr_o = predict_addr;
 
 endmodule

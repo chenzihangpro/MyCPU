@@ -43,6 +43,7 @@ def main():
     iverilog_cmd.append(rtl_dir + r'/rtl/core/mem.v')
     iverilog_cmd.append(rtl_dir + r'/rtl/core/ex_mem.v')
     iverilog_cmd.append(rtl_dir + r'/rtl/core/mem_wb.v')
+    iverilog_cmd.append(rtl_dir + r'/rtl/core/branch_prediction.v')
     iverilog_cmd.append(rtl_dir + r'/rtl/core/MyCPU.v')
     # ../rtl/soc
     iverilog_cmd.append(rtl_dir + r'/rtl/soc/ram.v')

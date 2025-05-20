@@ -10,12 +10,13 @@
 // Date        By              Version         Change Description
 // -----------------------------------------------------------------------------
 // 2025/05/01  sasathreena     0.9             初始版本
+// 2025/05/01  sasathreena     1.0             添加分支预测支持
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 // 模块: id - 指令译码单元
 // 功能: 解析指令格式，生成操作控制信号
-// 说明: 支持RV32I基本指令集，产生ALU和寄存器操作控制信号
+// 说明: 支持RV32I基本指令集，产生ALU和寄存器操作控制信号，添加分支预测功能
 // -----------------------------------------------------------------------------
 
 `include "defines.v"
@@ -53,6 +54,13 @@ module id(
     input wire wb_reg_we_i,                  // WB阶段的寄存器写使能
     input wire[`RegAddrBus] wb_reg_waddr_i,  // WB阶段的寄存器写地址
     input wire[`RegBus] wb_reg_wdata_i,      // WB阶段的寄存器写数据
+
+    // 分支预测接口
+    input wire predict_taken_i,              // 预测的跳转方向
+    input wire[`InstAddrBus] predict_addr_i, // 预测的跳转地址
+    output reg is_branch_o,                  // 是否是分支指令
+    output reg predict_taken_o,              // 传递给下一阶段的预测结果
+    output reg[`InstAddrBus] predict_addr_o, // 传递给下一阶段的预测地址
 
     // to regs
     output reg[`RegAddrBus] reg1_raddr_o,    // 读通用寄存器1地址
@@ -149,6 +157,34 @@ module id(
                        reg2_raw_mem ? mem_reg_wdata_i :
                        reg2_raw_wb ? wb_reg_wdata_i :
                        reg2_rdata_i;
+
+    // 识别分支指令及传递分支预测信息
+    always @ (*) begin
+        is_branch_o = `NotBranch;
+        predict_taken_o = predict_taken_i;
+        predict_addr_o = predict_addr_i;
+        
+        // 检查是否为分支或跳转指令
+        if (opcode == `INST_TYPE_B) begin
+            is_branch_o = `IsBranch;
+            // 这里只传递IF阶段的预测结果，但需要确保预测地址有效
+            // 如果预测地址为0，可能是无效的，则不采用预测
+            if (predict_addr_i == 32'h0) begin
+                predict_taken_o = `PredictNotTaken;
+            end
+        end else if (opcode == `INST_JAL || opcode == `INST_JALR) begin
+            // 对于JAL和JALR，我们可以固定认为会跳转
+            is_branch_o = `IsBranch;
+            
+            // JAL/JALR总是跳转，但我们依然尊重预测结果
+            // 对于JAL，可以计算精确的跳转地址
+            if (opcode == `INST_JAL) begin
+                // 对于JAL指令，预测地址可以在ID阶段精确计算
+                predict_taken_o = `PredictTaken;
+                predict_addr_o = inst_addr_i + {{12{inst_i[31]}}, inst_i[19:12], inst_i[20], inst_i[30:21], 1'b0};
+            end
+        end
+    end
 
     always @ (*) begin
         inst_o = inst_i;
